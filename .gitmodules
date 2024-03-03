@@ -1,0 +1,3 @@
+[submodule "microxcaling"]
+	path = microxcaling
+	url = github.com:LiuTaowen-Tony/microxcaling.git

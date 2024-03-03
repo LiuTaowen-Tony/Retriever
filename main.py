@@ -248,12 +248,12 @@ if __name__ == "__main__":
     distributed = True if not eval else False
     arch = retriever
     dtype = "bfloat16"
-    model_root = "/home/work/disk/vision/retriever"
+    model_root = "model"
     model_path = "checkpoint/retriever_medium.pth.tar"
     model_backup_path = "checkpoint/model_backup.pth.tar"
-    tokenizer_path = "tokenizer_models/tokenizer_v2_600G.json"
+    tokenizer_path = "tokenizer_models/tokenizer_300G.json"
     token_dump_path = "checkpoint/tokens.pkl"
-    data_root = "/home/work/disk/language-data"
+    data_root = "data"
     data_dirs = {  # total 1024 part per dataset, each part size
         # "english_CommonCrawl2023": [1, '\n\n\n'],  # 800M
         "english_c4": [1, '\n\n\n'],  # 770M
