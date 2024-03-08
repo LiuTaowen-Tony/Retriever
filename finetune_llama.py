@@ -55,6 +55,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 from microxcaling.mx import finalize_mx_specs
+from replace_llama import replace_llama
 
 
 
@@ -83,6 +84,10 @@ class MxSpecArguments:
     mx_block_size: Optional[int] = field(
         default=32,
         metadata={"help": "The block size to be used for the MX specs."},
+    )
+    scale_bits: Optional[int] = field(
+        default=8,
+        metadata={"help": "The scale bits to be used for the MX specs."},
     )
     bfloat: Optional[int] = field(
         default=16,
@@ -463,43 +468,48 @@ def main():
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
-    # if model_args.model_name_or_path:
-    #     torch_dtype = (
-    #         model_args.torch_dtype
-    #         if model_args.torch_dtype in ["auto", None]
-    #         else getattr(torch, model_args.torch_dtype)
-    #     )
-    #     model = AutoModelForCausalLM.from_pretrained(
-    #         model_args.model_name_or_path,
-    #         from_tf=bool(".ckpt" in model_args.model_name_or_path),
-    #         config=config,
-    #         cache_dir=model_args.cache_dir,
-    #         revision=model_args.model_revision,
-    #         token=model_args.token,
-    #         trust_remote_code=model_args.trust_remote_code,
-    #         torch_dtype=torch_dtype,
-    #         low_cpu_mem_usage=model_args.low_cpu_mem_usage,
-    #     )
-    # else:
-    #     model = AutoModelForCausalLM.from_config(config, trust_remote_code=model_args.trust_remote_code)
-    #     n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-    #     logger.info(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
+    if model_args.model_name_or_path:
+        torch_dtype = (
+            model_args.torch_dtype
+            if model_args.torch_dtype in ["auto", None]
+            else getattr(torch, model_args.torch_dtype)
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=model_args.low_cpu_mem_usage,
+        )
+    else:
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=model_args.trust_remote_code)
+        n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
+        logger.info(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
 
-    # # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # # on a small vocab and want a smaller embedding size, remove this test.
-    # embedding_size = model.get_input_embeddings().weight.shape[0]
-    # if len(tokenizer) > embedding_size:
-    #     model.resize_token_embeddings(len(tokenizer))
-    retriever_parse_config.batch_size = training_args.per_device_train_batch_size
+    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
+    # on a small vocab and want a smaller embedding size, remove this test.
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        model.resize_token_embeddings(len(tokenizer))
     mx_specs = finalize_mx_specs(mx_specs.__dict__)
-    if not retriever_parse_config.using_mx:
-        mx_specs = None
-    
-    retriever_parse_config.mx_specs = mx_specs
-    retriever_config = RetrieverConfig(**retriever_parse_config.__dict__)
-    print(retriever_config)
 
-    model = RetrieverModel(retriever_config, tokenizer)
+    if retriever_parse_config.using_mx:
+        model = replace_llama(model, mx_specs)
+
+    # retriever_parse_config.batch_size = training_args.per_device_train_batch_size
+    # mx_specs = finalize_mx_specs(mx_specs.__dict__)
+    # if not retriever_parse_config.using_mx:
+    #     mx_specs = None
+    
+    # retriever_parse_config.mx_specs = mx_specs
+    # retriever_config = RetrieverConfig(**retriever_parse_config.__dict__)
+    # print(retriever_config)
+
+    # model = RetrieverModel(retriever_config, tokenizer)
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -657,6 +667,7 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
+        print(type(model.model.layers[0].self_attn.k_proj))
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
 

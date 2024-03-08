@@ -86,7 +86,7 @@ class MLP(nn.Module):
     def __init__(self, hidden_size, mx_specs):
         super(MLP, self).__init__()
         self.hidden_size = hidden_size
-        self.intermediate_size = int(hidden_size * 2.68)
+        self.intermediate_size = int(hidden_size * 2.6875)
 
         if mx_specs is not None:
             mk_linear = functools.partial(mx.Linear, mx_specs=mx_specs)
@@ -169,20 +169,20 @@ class DecoderLayer(nn.Module):
         super().__init__()
         self.mx_specs = mx_specs
         self.mx_skip = mx_skip
-        self.ln_1 = RMSNorm(config.hidden_size)
-        self.attn = Attention(config, attention_mask, position_ids, mx_specs, mx_attn=mx_attn)
-        self.ln_2 = RMSNorm(config.hidden_size)
+        self.input_layernorm = RMSNorm(config.hidden_size)
+        self.self_attn = Attention(config, attention_mask, position_ids, mx_specs, mx_attn=mx_attn)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size)
         self.mlp = MLP(config.hidden_size, mx_specs=mx_specs)
 
     def forward(self, x, masks):
         if self.mx_specs is None or not self.mx_skip:
-            x = x + self.attn(self.ln_1(x), masks)
-            x = x + self.mlp(self.ln_2(x))
+            x = x + self.self_attn(self.input_layernorm(x), masks)
+            x = x + self.mlp(self.post_attention_layernorm(x))
         else:
             x, residual = mx.simd_split(x)
-            x = mx.simd_add(residual, self.attn(self.ln_1(x), masks))
+            x = mx.simd_add(residual, self.self_attn(self.input_layernorm(x), masks))
             x, residual = mx.simd_split(x)
-            x = mx.simd_add(residual, self.mlp(self.ln_2(x)))
+            x = mx.simd_add(residual, self.mlp(self.post_attention_layernorm(x)))
         return x
 
 @dataclass
@@ -201,7 +201,7 @@ class RetrieverParseConfig:
 class RetrieverConfig(PretrainedConfig):
     model_type = "retriever"
 
-    def __init__(self, vocab_size=50257, num_layers=6, hidden_size=768, num_heads=12, mx_skip=False, mx_attn=False, using_mx=False, mx_lm_head=False, sequence_length=1024, mx_specs=None, **kwargs):
+    def __init__(self, vocab_size=50257, num_layers=6, hidden_size=768, num_heads=12, mx_skip=False, mx_attn=False, using_mx=False, mx_lm_head=False, sequence_length=1024, mx_specs=None, device="cuda", **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.num_layers = num_layers
@@ -213,7 +213,7 @@ class RetrieverConfig(PretrainedConfig):
         self.mx_lm_head = mx_lm_head
         self.sequence_length = sequence_length
         self.mx_specs = mx_specs
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         self.ptdtype = torch.bfloat16 if self.device == "cuda" else torch.float32
 
     def to_dict(self):
@@ -259,13 +259,13 @@ class RetrieverConfig(PretrainedConfig):
         return f"RetrieverConfig(vocab_size={self.vocab_size}, num_layers={self.num_layers}, hidden_size={self.hidden_size}, num_heads={self.num_heads}, mx_skip={self.mx_skip}, mx_attn={self.mx_attn}, using_mx={self.using_mx}, mx_lm_head={self.mx_lm_head}, sequence_length={self.sequence_length}, mx_specs={self.mx_specs})"
 
 class Retriever(nn.Module):
-    def __init__(self, device, ptdtype, config, mx_specs,mx_skip=False, mx_attn=False, mx_lm_head=False):
+    def __init__(self, device, ptdtype, config, mx_specs, mx_skip=False, mx_attn=False, mx_lm_head=False):
         super(Retriever, self).__init__()
         self.device = device
         self.ptdtype = ptdtype
         self.config = config
         self.vocab_size = config.vocab_size
-        self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         position_ids = torch.arange(0, config.sequence_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0).view(-1, config.sequence_length)
         attention_mask = make_causal_mask(config.batch_size, config.sequence_length, device, ptdtype)
@@ -276,7 +276,7 @@ class Retriever(nn.Module):
         else:
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        self.token_embedding.weight = self.lm_head.weight
+        self.embed_tokens.weight = self.lm_head.weight
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith('d_proj.weight') or pn.endswith('o_proj.weight'):
@@ -313,7 +313,7 @@ class Retriever(nn.Module):
         return optimizer
 
     def forward(self, input_ids, labels=None, masks=None):
-        tok_emb = self.token_embedding(input_ids)
+        tok_emb = self.embed_tokens(input_ids)
         x = tok_emb
 
         if masks is not None:
@@ -385,7 +385,11 @@ class RetrieverModel(PreTrainedModel):
 
     def __init__(self, config, pretrained=False,):
         super(RetrieverModel, self).__init__(config)
-        self.model = Retriever(device="cuda", ptdtype=torch.float32, config=config, 
+        if config.using_mx:
+            dtype = torch.float32
+        else:
+            dtype = torch.bfloat16
+        self.model = Retriever(device="cuda", ptdtype=dtype, config=config, 
                     mx_specs=config.mx_specs, mx_skip=config.mx_skip, 
                     mx_attn=config.mx_attn,
                     mx_lm_head=config.mx_lm_head, )
